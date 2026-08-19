@@ -67,10 +67,17 @@ await test('bin CLI argument parsing', async (t) => {
 
   await t.test('--host defaults to localhost when omitted', async () => {
     const port = await getPort()
-    const dbFile = createTmpDb()
+    // Provide data so logRoutes prints host-parameterized endpoint URLs
+    const dbFile = createTmpDb({ posts: [{ id: '1' }] })
     const result = await run(['--port', String(port), dbFile])
     assert.equal(result.killed, true, 'Server should have started (killed by timeout)')
-    assert.match(result.stdout, /http:\/\/localhost:/, 'stdout should contain http://localhost:')
+    // The Endpoints section uses the host variable; verify it resolves to localhost
+    assert.match(result.stdout, /Endpoints:/, 'stdout should contain Endpoints section')
+    assert.match(
+      result.stdout,
+      new RegExp(`http://localhost:${port}/posts`),
+      'Endpoints should show localhost as the default host',
+    )
   })
 
   await t.test('--static with missing directory crashes with ENOENT', async () => {
