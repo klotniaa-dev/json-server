@@ -77,8 +77,62 @@ ${obj}"
 } > "${REPORT_MD}"
 
 # ---------------------------------------------------------------------------
+# gitleaks severity mapping
+# ---------------------------------------------------------------------------
+# gitleaks' default JSON output does not carry a per-finding severity field
+# (and Tags is usually empty), so we map the RuleID to a severity bucket that
+# matches the CRITICAL/HIGH/MEDIUM/LOW scheme the fallback and the hook use.
+# Unknown rules default to MEDIUM so nothing is silently downgraded to LOW.
+gitleaks_severity_for_rule() {
+  case "$1" in
+    # Direct, high-impact credentials -> CRITICAL.
+    *private-key*|*private_key*|\
+    aws-access-token|aws-secret-key|\
+    github-pat|github-fine-grained-pat|github-oauth|github-app-token|github-refresh-token|\
+    gcp-*|azure-*|\
+    stripe-access-token|\
+    slack-*|\
+    rsa-private-key|ssh-*|pgp-private-key)
+      echo "CRITICAL" ;;
+    # Service API keys / tokens -> HIGH.
+    *api-key*|*api_key*|*-token|*_token|*secret*|*password*|*credential*)
+      echo "HIGH" ;;
+    # Everything else gitleaks flags is still a real finding; default MEDIUM.
+    *)
+      echo "MEDIUM" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
 # gitleaks path
 # ---------------------------------------------------------------------------
+# Parse a gitleaks JSON report and emit each finding as tab-separated
+# "file<TAB>line<TAB>ruleid<TAB>commit". File paths are relative to the scan
+# source, so the caller prefixes the repo name to make them workspace-relative.
+emit_gitleaks_findings() {
+  local report="$1" repo_path="$2"
+  [ -f "${report}" ] || return 0
+  # gitleaks' File is absolute for a --no-git filesystem scan but repo-relative
+  # for a history scan. Normalize it to repo-relative here (strip the repo_path
+  # prefix) so the caller can build a stable workspace-relative path.
+  REPO_PATH="${repo_path}" python3 -c "import json,os,sys
+root=os.environ.get('REPO_PATH','').rstrip('/')
+try:
+    data=json.load(open('${report}'))
+except Exception:
+    sys.exit(0)
+if not isinstance(data,list):
+    sys.exit(0)
+for x in data:
+    f=x.get('File','')
+    if root and os.path.isabs(f):
+        try:
+            f=os.path.relpath(f, root)
+        except Exception:
+            pass
+    print('%s\t%s\t%s\t%s' % (f, x.get('StartLine',0), x.get('RuleID',''), x.get('Commit','')))" 2>/dev/null || true
+}
+
 run_gitleaks_for_repo() {
   local repo_name="$1" repo_path="$2"
   local gl_report="${REPORT_DIR}/gitleaks-${repo_name}-${TIMESTAMP}.json"
@@ -90,54 +144,69 @@ run_gitleaks_for_repo() {
   gitleaks detect --source "${repo_path}" --no-git --redact \
     --report-format json --report-path "${gl_report}" >/dev/null 2>&1 || true
 
-  # If the repo has git history, also scan it.
+  # If the repo has git history, also scan it. History is a primary exposure
+  # vector (secrets committed then deleted), so its findings are parsed and
+  # merged into the counts/report below, not just written to disk.
+  local gl_hist=""
   if [ -d "${repo_path}/.git" ]; then
-    local gl_hist="${REPORT_DIR}/gitleaks-${repo_name}-history-${TIMESTAMP}.json"
+    gl_hist="${REPORT_DIR}/gitleaks-${repo_name}-history-${TIMESTAMP}.json"
     gitleaks detect --source "${repo_path}" --redact \
       --report-format json --report-path "${gl_hist}" >/dev/null 2>&1 || true
   fi
 
-  local count=0
-  if [ -f "${gl_report}" ]; then
-    # Count top-level JSON array entries using python3 (available in sandbox).
-    count="$(python3 -c "import json,sys;
-try:
-    data=json.load(open('${gl_report}'))
-    print(len(data) if isinstance(data,list) else 0)
-except Exception:
-    print(0)" 2>/dev/null || echo 0)"
+  local repo_findings=0
+  local f ln rule commit rel severity scope
+
+  # Working-tree findings.
+  while IFS=$'\t' read -r f ln rule commit; do
+    [ -z "${f}" ] && continue
+    rel="${repo_name}/${f}"
+    severity="$(gitleaks_severity_for_rule "${rule}")"
+    add_json_finding "${repo_name}" "${rel}" "${ln:-0}" "${severity}" "${rule}"
+    echo "- ${severity} \`${rel}:${ln}\` rule=${rule}" >> "${REPORT_MD}"
+    repo_findings=$((repo_findings + 1))
+  done < <(emit_gitleaks_findings "${gl_report}" "${repo_path}")
+
+  # Git-history findings (commit-scoped). These are reported with the short
+  # commit so a secret that only exists in history is still surfaced.
+  if [ -n "${gl_hist}" ]; then
+    while IFS=$'\t' read -r f ln rule commit; do
+      [ -z "${f}" ] && continue
+      rel="${repo_name}/${f}"
+      severity="$(gitleaks_severity_for_rule "${rule}")"
+      scope="${commit:0:8}"
+      add_json_finding "${repo_name}" "${rel}" "${ln:-0}" "${severity}" "${rule} (history ${scope})"
+      echo "- ${severity} \`${rel}:${ln}\` rule=${rule} (git history commit ${scope})" >> "${REPORT_MD}"
+      repo_findings=$((repo_findings + 1))
+    done < <(emit_gitleaks_findings "${gl_hist}" "${repo_path}")
   fi
 
-  if [ "${count}" -gt 0 ]; then
-    echo "Found ${count} potential secret(s). See ${gl_report}." >> "${REPORT_MD}"
-    # Extract per-finding details.
-    while IFS=$'\t' read -r f ln rule; do
-      [ -z "${f}" ] && continue
-      add_json_finding "${repo_name}" "${f}" "${ln:-0}" "HIGH" "${rule}"
-      echo "- HIGH \`${f}:${ln}\` rule=${rule}" >> "${REPORT_MD}"
-    done < <(python3 -c "import json;
-data=json.load(open('${gl_report}'))
-for x in data:
-    print('%s\t%s\t%s' % (x.get('File',''), x.get('StartLine',0), x.get('RuleID','')))" 2>/dev/null || true)
-    TOTAL_FINDINGS=$((TOTAL_FINDINGS + count))
-  else
+  if [ "${repo_findings}" -eq 0 ]; then
     echo "No findings." >> "${REPORT_MD}"
+  else
+    echo "" >> "${REPORT_MD}"
+    echo "Found ${repo_findings} potential secret(s) (working tree + git history)." >> "${REPORT_MD}"
   fi
   echo "" >> "${REPORT_MD}"
+  TOTAL_FINDINGS=$((TOTAL_FINDINGS + repo_findings))
 }
 
 # ---------------------------------------------------------------------------
 # Built-in regex fallback
 # ---------------------------------------------------------------------------
-# Each entry: "SEVERITY|RULE|REGEX"
+# Each entry is TAB-separated: "SEVERITY<TAB>RULE<TAB>REGEX".
+# A tab delimiter is used (not '|') because '|' is a regex metacharacter: the
+# regexes below use '|' for alternation, so splitting on '|' would truncate
+# them mid-expression. The fields are read with `IFS=$'\t'`, and tab cannot
+# appear inside any of these regexes, so each regex survives intact.
 declare -a PATTERNS=(
-  "CRITICAL|AWS Access Key ID|AKIA[0-9A-Z]{16}"
-  "CRITICAL|Private Key Header|-----BEGIN ([A-Z ]+ )?PRIVATE KEY-----"
-  "CRITICAL|GitHub Token|(ghp_|gho_|ghu_|ghs_|ghr_|github_pat_)[0-9A-Za-z_]{20,}"
-  "HIGH|Slack Token|xox[baprs]-[0-9A-Za-z-]{10,}"
-  "HIGH|AWS Secret Access Key|(aws_secret_access_key|aws_secret)[[:space:]]*[:=][[:space:]]*[\"']?[A-Za-z0-9/+=]{40}[\"']?"
-  "MEDIUM|Generic Secret Assignment|(api[_-]?key|secret|password|passwd|token|access[_-]?key)[\"']?[[:space:]]*[:=][[:space:]]*[\"'][^\"']{8,}[\"']"
-  "LOW|High-Entropy Assignment|[\"']?[A-Za-z0-9_]+[\"']?[[:space:]]*[:=][[:space:]]*[\"'][A-Za-z0-9+/]{32,}={0,2}[\"']"
+  "CRITICAL"$'\t'"AWS Access Key ID"$'\t'"AKIA[0-9A-Z]{16}"
+  "CRITICAL"$'\t'"Private Key Header"$'\t'"-----BEGIN ([A-Z ]+ )?PRIVATE KEY-----"
+  "CRITICAL"$'\t'"GitHub Token"$'\t'"(ghp_|gho_|ghu_|ghs_|ghr_|github_pat_)[0-9A-Za-z_]{20,}"
+  "HIGH"$'\t'"Slack Token"$'\t'"xox[baprs]-[0-9A-Za-z-]{10,}"
+  "HIGH"$'\t'"AWS Secret Access Key"$'\t'"(aws_secret_access_key|aws_secret)[[:space:]]*[:=][[:space:]]*[\"']?[A-Za-z0-9/+=]{40}[\"']?"
+  "MEDIUM"$'\t'"Generic Secret Assignment"$'\t'"(api[_-]?key|secret|password|passwd|token|access[_-]?key)[\"']?[[:space:]]*[:=][[:space:]]*[\"'][^\"']{8,}[\"']"
+  "LOW"$'\t'"High-Entropy Assignment"$'\t'"[\"']?[A-Za-z0-9_]+[\"']?[[:space:]]*[:=][[:space:]]*[\"'][A-Za-z0-9+/]{32,}={0,2}[\"']"
 )
 
 # Directories/files to skip during the fallback scan.
@@ -162,9 +231,9 @@ run_fallback_for_repo() {
     should_skip_path "${file}" && continue
     local entry severity rule regex
     for entry in "${PATTERNS[@]}"; do
-      severity="${entry%%|*}"
-      rule="${entry#*|}"; rule="${rule%%|*}"
-      regex="${entry##*|}"
+      # Split the three fields on the tab delimiter. Tab cannot appear inside
+      # any regex, so alternation ('|') in the regex is preserved intact.
+      IFS=$'\t' read -r severity rule regex <<< "${entry}"
       # grep -I skips binary files; -n gives line numbers; -E extended regex.
       local match
       while IFS= read -r match; do
@@ -174,7 +243,7 @@ run_fallback_for_repo() {
         add_json_finding "${repo_name}" "${rel}" "${ln}" "${severity}" "${rule}"
         echo "- ${severity} \`${rel}:${ln}\` rule=${rule}" >> "${REPORT_MD}"
         repo_findings=$((repo_findings + 1))
-      done < <(grep -InE "${regex}" "${file}" 2>/dev/null | cut -d: -f1 | sed 's/$/:/' || true)
+      done < <(grep -InE -e "${regex}" -- "${file}" 2>/dev/null | cut -d: -f1 | sed 's/$/:/' || true)
     done
   done < <(find "${repo_path}" -type f 2>/dev/null)
 

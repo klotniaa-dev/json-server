@@ -29,6 +29,39 @@ headers (`-----BEGIN ... PRIVATE KEY-----`), GitHub tokens
 (`ghp_` / `gho_` / `github_pat_` ...), Slack tokens (`xox[baprs]-`), and
 high-entropy-looking assignments.
 
+### Coverage: working tree **and** git history
+
+When gitleaks is used and a repo has a `.git` directory, the scanner runs two
+passes and **merges both** into the findings, counts, report, and exit code:
+
+1. a `--no-git` filesystem scan of the current **working tree**, and
+2. a full **git-history** scan.
+
+History is a primary exposure vector (a credential committed and later deleted
+still lives in history), so history findings are surfaced with the short commit
+hash, e.g. `rule=github-pat (git history commit 3cd491eb)`. A secret present in
+both the working tree and the latest commit may be reported twice; this is
+intentional over-reporting so nothing is silently dropped.
+
+The built-in regex fallback scans only the **working tree** (it does not read
+git history). Install gitleaks for history coverage.
+
+### Severity
+
+Each finding is bucketed as `CRITICAL` / `HIGH` / `MEDIUM` / `LOW`. The fallback
+assigns severity per rule. gitleaks' default JSON output has no per-finding
+severity field, so the scanner maps each gitleaks `RuleID` to a bucket
+(e.g. `aws-access-token`, `github-pat`, and private-key rules -> `CRITICAL`;
+other `*-token` / `*secret*` / `*password*` rules -> `HIGH`; anything else ->
+`MEDIUM`). This keeps the severity grouping meaningful regardless of which
+scanner ran.
+
+### Report path shape
+
+In the JSON report the `file` field is always **workspace-relative** (e.g.
+`gson/src/.../Foo.java`) on both the gitleaks and the fallback path, so a
+consumer sees one consistent path shape.
+
 ## Reports
 
 Each run writes a timestamped pair of reports under:
