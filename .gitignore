@@ -5,3 +5,8 @@ lib
 node_modules
 public/output.css
 tmp
+
+# Security scan output (scripts/security/secret-scan.sh)
+.security/reports/*
+!.security/reports/.gitkeep
+.security/*.log
