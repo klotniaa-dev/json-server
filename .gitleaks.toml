@@ -1,0 +1,13 @@
+# Gitleaks configuration. Extends the default ruleset.
+[extend]
+useDefault = true
+
+# Allowlist: add entries only for verified false positives, each with a
+# comment (file, rule, why it is not a real secret). Example:
+#
+# [[allowlists]]
+# description = "Test fixture token in <file> (rule <id>), not a real credential"
+# paths = ['''path/to/fixture''']
+#
+# Current entries: none. The initial scan of the working tree and full
+# history found no leaks.
