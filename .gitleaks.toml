@@ -1,0 +1,12 @@
+# gitleaks configuration. See https://github.com/gitleaks/gitleaks#configuration
+[extend]
+useDefault = true
+
+# Baseline scan found no secrets, so there are no allowlist entries.
+# To suppress a confirmed false positive (for example a clearly fake test fixture),
+# add an entry below, keeping it as narrow as possible:
+#
+# [[allowlists]]
+# description = "Fake token used in unit test fixture"
+# paths = ['''src/test/fixtures/fake-token\.txt''']
+# regexes = ['''EXAMPLE_NOT_A_REAL_KEY''']
