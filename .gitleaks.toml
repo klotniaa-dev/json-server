@@ -1,0 +1,4 @@
+# Extends the default gitleaks ruleset. Baseline scan was clean, so no allowlist.
+# Add an [[allowlists]] entry here only for verified false positives.
+[extend]
+useDefault = true

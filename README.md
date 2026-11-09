@@ -261,3 +261,7 @@ If you are upgrading from json-server v0.x, note these behavioral changes:
 - **Request delays:** Use browser DevTools (Network tab > throttling) instead of the removed `--delay` CLI option
 
 > **New to json-server?** These notes are for users migrating from v0. If this is your first time using json-server, you can ignore this section.
+
+## Secret scanning
+
+A [gitleaks](https://github.com/gitleaks/gitleaks) workflow (`.github/workflows/secret-scan.yml`) runs **every hour**. Each run reviews commits from the **last 7 days**, and a full-history scan runs weekly (Monday 03:17 UTC) or on demand. Findings are redacted, summarized in the job summary, and fail the run. Verified false positives go in `.gitleaks.toml`.
