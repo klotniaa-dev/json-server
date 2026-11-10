@@ -1,0 +1,8 @@
+# Gitleaks configuration for the hourly secret-scan workflow.
+# Uses the default ruleset. The baseline scan (full history and 7-day window)
+# found no secrets, so no allowlist entries are needed. Add narrowly scoped
+# entries (with a comment explaining why) only for demonstrably fake fixtures.
+title = "gitleaks config"
+
+[extend]
+useDefault = true
